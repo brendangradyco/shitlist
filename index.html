@@ -2958,7 +2958,7 @@ function renderCompactView(el) {
           task.completedAt = new Date().toISOString();
           task.lastAccessed = new Date().toISOString();
           saveTasks();
-          setTimeout(() => { archiveTask(task.id); renderTaskList(); }, 600);
+          setTimeout(() => { archiveTask(task.id); }, 600);
         } else {
           task.completedAt = null;
           task.lastAccessed = new Date().toISOString();
