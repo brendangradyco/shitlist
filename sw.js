@@ -1,5 +1,5 @@
-const CACHE = 'shitlist-v8';
-const ASSETS = ['/shitlist/', '/shitlist/index.html', '/shitlist/manifest.json'];
+const CACHE = 'shitlist-v6';
+const ASSETS = ['/', '/index.html', '/manifest.json'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
@@ -15,6 +15,6 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   e.respondWith(
-    caches.match(e.request).then(cached => cached || fetch(e.request).catch(() => caches.match('/shitlist/index.html')))
+    caches.match(e.request).then(cached => cached || fetch(e.request).catch(() => caches.match('/index.html')))
   );
 });

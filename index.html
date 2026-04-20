@@ -494,22 +494,8 @@ html, body {
 .compact-task-cb {
   width: 16px; height: 16px;
   flex-shrink: 0; margin-top: 2px;
-  border: 1.5px solid var(--border);
-  border-radius: 4px;
-  background: var(--card);
+  accent-color: var(--green);
   cursor: pointer;
-  touch-action: manipulation;
-  display: flex; align-items: center; justify-content: center;
-}
-.compact-task-cb.cb-checked {
-  background: var(--green);
-  border-color: var(--green);
-}
-.compact-task-cb.cb-checked::after {
-  content: '✓';
-  font-size: 10px;
-  color: #0A140C;
-  font-weight: 700;
 }
 .compact-bullet {
   width: 4px; height: 4px; border-radius: 50%;
@@ -1234,8 +1220,9 @@ const CATS = [
   { id:'ux',       label:'🎨 UX/UI',             cls:'ux'      },
   { id:'finance',  label:'💰 Debt/Financial',    cls:'finance' },
   { id:'legal',    label:'⚖️ Legal',             cls:'legal'   },
-  { id:'urgent',   label:'⏰ Time Sensitive',    cls:'urgent'  },
 ];
+// NOTE: 'urgent' is NOT a category — it is a boolean flag (urgentFlag) on the task.
+// This was the root cause of View All checkbox conflicts and filter breakage.
 
 const CAT_KEYWORDS = {
   home:     ['fix','repair','clean','install','paint','build','replace','maintenance','faucet','plumb','roof','garden','lawn','mow','window','door','cabinet','bathroom','kitchen','bedroom'],
@@ -1246,7 +1233,6 @@ const CAT_KEYWORDS = {
   ux:       ['figma','prototype','wireframe','design','ux','ui','user','usability','sketch','interface','component','token','frame'],
   finance:  ['pay','bill','invoice','budget','credit','debt','loan','bank','money','transfer','expense','tax','insurance','rent','mortgage'],
   legal:    ['lawyer','attorney','contract','court','legal','sue','document','sign','notary','lease','agreement','permit','license','ticket'],
-  urgent:   ['urgent','asap','today','deadline','due','immediately','emergency','critical','important','priority'],
 };
 
 function suggestCategory(text) {
@@ -1348,84 +1334,105 @@ function saveTabs() { save('sl_tabs', tabs); }
 function saveCompleted() { save('sl_completed', completed); }
 function saveCatOrder() { save('sl_catOrder', state.catOrder); }
 
-// ── Category migration — fix any tasks missing a category ──
+// ── Category migration — fix any tasks missing a category or wrongly set to 'urgent' ──
+// 'urgent' was previously a category but is now ONLY a flag. Remap those tasks.
 function migrateCategories() {
   let changed = false;
-  tasks.forEach(t => {
-    if (!t.category) {
+  const fixCat = t => {
+    if (!t.category || t.category === 'urgent') {
+      // If category was 'urgent', preserve urgentFlag and assign a real category
+      if (t.category === 'urgent') t.urgentFlag = true;
       t.category = suggestCategory(t.title);
+      // Fallback if suggestCategory still returns something invalid
+      const validIds = CATS.map(c => c.id);
+      if (!validIds.includes(t.category)) t.category = 'personal';
       changed = true;
     }
-  });
-  completed.forEach(t => {
-    if (!t.category) {
-      t.category = suggestCategory(t.title);
-      changed = true;
-    }
-  });
+  };
+  tasks.forEach(fixCat);
+  completed.forEach(fixCat);
   if (changed) { saveTasks(); saveCompleted(); }
 }
 
 // ── Carry-over logic (run on load) ──
+// Pure-function approach per Codex: build next[] and newArchive[] separately,
+// never mutate the array while iterating, then replace in one clean operation.
 function runCarryover() {
   const today = todayStr();
+  const now = new Date().toISOString();
+  const next = [];
+  const newArchive = [];
 
-  tasks.forEach(t => {
-    // Derive taskType for legacy tasks
+  for (const t of tasks) {
+    // Ensure taskType is always set (legacy migration)
     if (!t.taskType) {
       t.taskType = t.todayOnly ? 'today' : 'onetime';
     }
 
-    if (t.taskType === 'today') return; // today-only: never carries forward
+    // Tasks already on today or future — keep as-is
+    if (t.date >= today) {
+      next.push(t);
+      continue;
+    }
 
-    // Skip tasks already on today's date
-    if (t.date >= today) return;
-
+    // Task is from a past day — apply rules per type:
     if (t.taskType === 'repeat') {
-      // Repeat tasks: if completed yesterday, archive that completion record
-      // then reset the task for today
       if (t.done && t.completedAt) {
-        // Save a completed snapshot for the day it was done
-        const completedDay = (t.completedAt).slice(0,10);
-        completed.push({
+        // Archive a snapshot for the day it was completed
+        newArchive.push({
           ...t,
-          date: completedDay,          // preserve the day it was actually done
-          archivedAt: new Date().toISOString(),
+          id: uid(),                     // new archive ID
+          date: localDateFromISO(t.completedAt) || t.date,
+          archivedAt: now,
           _repeatSnapshot: true
         });
       }
-      // Reset for today regardless of done state
-      t.done = false;
-      t.completedAt = null;
-      t.completedDate = null; // clear so task shows again today
-      t.carryover = true;
-      t.date = today;
-      t.lastCarryDate = today;
-      t.lastAccessed = new Date().toISOString();
+      // Always reset and carry forward regardless of done state
+      next.push({
+        ...t,
+        done: false,
+        completedAt: null,
+        carryover: true,
+        date: today,
+        lastCarryDate: today,
+        lastAccessed: now
+      });
 
     } else if (t.taskType === 'onetime') {
       if (t.done) {
-        // Done onetime tasks that weren't archived yet — archive them now
-        // preserving the date they were completed on (not today)
-        const completedDay = t.completedAt ? t.completedAt.slice(0,10) : t.date;
-        completed.push({
+        // Archive and remove
+        newArchive.push({
           ...t,
-          date: completedDay,
-          archivedAt: new Date().toISOString()
+          date: t.completedAt ? (localDateFromISO(t.completedAt) || t.date) : t.date,
+          archivedAt: now
         });
-        t.archived = true; // mark for cleanup below
+        // Don't push to next — task is done
       } else {
-        // Not done — carry forward
-        t.carryover = true;
-        t.date = today;
-        t.lastCarryDate = today;
-        t.lastAccessed = new Date().toISOString();
+        // Not done — carry forward to today
+        next.push({
+          ...t,
+          carryover: true,
+          date: today,
+          lastCarryDate: today,
+          lastAccessed: now
+        });
       }
-    }
-  });
 
-  // Remove onetime tasks that were just archived
-  tasks = tasks.filter(t => !t.archived);
+    } else if (t.taskType === 'today') {
+      if (t.done) {
+        // Today-only completed — archive it
+        newArchive.push({
+          ...t,
+          date: t.completedAt ? (localDateFromISO(t.completedAt) || t.date) : t.date,
+          archivedAt: now
+        });
+      }
+      // Today-only incomplete — silently drop (per spec: no carry-over)
+    }
+  }
+
+  tasks = next;
+  completed = [...completed, ...newArchive];
 
   saveTasks();
   saveCompleted();
@@ -1584,11 +1591,35 @@ function saveRenameTab() {
 }
 
 function deleteTab(id) {
-  if (!confirm('Delete this list? Tasks in it move to All Tasks.')) return;
-  tasks.forEach(t => { if (t.tabId === id) t.tabId = 'all'; });
+  const tabToDelete = tabs.find(t => t.id === id);
+  if (!tabToDelete) return;
+  const tasksInTab = tasks.filter(t => t.tabId === id);
+
+  if (!confirm('Delete the list "' + tabToDelete.label + '"?')) return;
+
+  // Ask where to move tasks if any exist in this tab
+  let targetTabId = 'all';
+  if (tasksInTab.length > 0) {
+    const otherTabs = tabs.filter(t => t.id !== id);
+    // Build a selection prompt
+    const tabOptions = otherTabs.map((t, i) => (i + 1) + ') ' + t.label).join('\n');
+    const choice = prompt(
+      tasksInTab.length + ' task(s) in this list need a new home.\n\nMove them to:\n' +
+      tabOptions + '\n\nType the number, or leave blank for "All Tasks":'
+    );
+    if (choice !== null && choice.trim() !== '') {
+      const idx = parseInt(choice.trim()) - 1;
+      if (idx >= 0 && idx < otherTabs.length) {
+        targetTabId = otherTabs[idx].id;
+      }
+    }
+    tasks.forEach(t => { if (t.tabId === id) t.tabId = targetTabId; });
+    saveTasks();
+  }
+
   tabs = tabs.filter(t => t.id !== id);
-  if (state.currentTab === id) state.currentTab = 'all';
-  saveTabs(); saveTasks();
+  if (state.currentTab === id) state.currentTab = targetTabId;
+  saveTabs();
   renderTabs(); renderTaskList();
 }
 
@@ -1644,7 +1675,7 @@ function localDateFromISO(iso) {
 }
 
 function getVisibleTasks() {
-  let list = tasks.filter(t => !t.archived && !t.done && !(t.completedDate === todayStr()) && t.date === state.currentDay);
+  let list = tasks.filter(t => !t.archived && t.date === state.currentDay);
   if (state.currentTab !== 'all') list = list.filter(t => t.tabId === state.currentTab);
 
   // Filters
@@ -1903,44 +1934,41 @@ function escHtml(s) {
 
 function toggleDone(id) {
   const t = tasks.find(t => t.id===id);
-  if (!t || t.done) return; // guard: already done, ignore
-  t.done = true;
-  t.completedAt = new Date().toISOString();
+  if (!t) return;
+  t.done = !t.done;
+  if (t.done) {
+    t.completedAt = new Date().toISOString();
+    // Move to archive after short delay
+    setTimeout(() => archiveTask(id), 800);
+  } else {
+    t.completedAt = null;
+  }
   t.lastAccessed = new Date().toISOString();
   saveTasks();
-  archiveTask(id); // immediate, no delay
+  renderTaskList();
 }
 
 function archiveTask(id) {
   const idx = tasks.findIndex(t => t.id===id);
   if (idx===-1) return;
   const t = tasks[idx];
-  if (!t.done) return; // guard: not done, ignore
+  if (!t.done) return; // unchecked before archive
 
+  // Store the local date the task was completed on (not the task's .date which may differ)
   const completedDay = t.completedAt ? t.completedAt.slice(0,10) : todayStr();
 
   if (t.taskType === 'repeat') {
-    // Guard: already archived today, just reset done and return
-    if (t.completedDate === completedDay) {
-      t.done = false;
-      t.completedAt = null;
-      saveTasks();
-      renderTaskList();
-      return;
-    }
+    // Repeat tasks: archive a snapshot but keep the live task — reset it instead of removing
     completed.push({ ...t, date: completedDay, archivedAt: new Date().toISOString(), _repeatSnapshot: true });
     t.done = false;
     t.completedAt = null;
-    t.completedDate = completedDay; // hidden for rest of day
     t.lastAccessed = new Date().toISOString();
     saveTasks(); saveCompleted();
     renderTaskList();
   } else {
-    // Onetime: splice first (prevents re-entry), then push once
+    // Onetime tasks: archive and remove
+    completed.push({ ...t, date: completedDay, archivedAt: new Date().toISOString() });
     tasks.splice(idx, 1);
-    if (!completed.some(c => c.id === id)) {
-      completed.push({ ...t, date: completedDay, archivedAt: new Date().toISOString() });
-    }
     saveTasks(); saveCompleted();
     renderTaskList();
   }
@@ -2180,16 +2208,26 @@ function saveNewTab() {
 function restoreTask(id) {
   const idx = completed.findIndex(t => t.id === id);
   if (idx === -1) return;
-  const t = { ...completed[idx] };
-  delete t._fromArchive;
-  t.done = false;
-  t.completedAt = null;
-  t.archivedAt = null;
-  t.date = state.currentDay;
-  t.lastAccessed = new Date().toISOString();
-  completed.splice(idx, 1);
-  tasks.push(t);
-  saveTasks(); saveCompleted();
+  const archived = completed[idx];
+  // Create a NEW copy with a new ID — archive record stays intact (immutable)
+  const restored = {
+    ...archived,
+    id: uid(),                          // new ID — archive record is never removed
+    done: false,
+    completedAt: null,
+    archivedAt: null,
+    _fromArchive: undefined,
+    _repeatSnapshot: undefined,
+    date: state.currentDay,
+    carryover: false,
+    lastAccessed: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    order: tasks.length,
+  };
+  delete restored._fromArchive;
+  delete restored._repeatSnapshot;
+  tasks.push(restored);
+  saveTasks();
   renderTaskList();
   if (document.getElementById('screen-archive').classList.contains('active')) renderArchive();
 }
@@ -2550,8 +2588,31 @@ function importOcrTasks() {
     targetTabId = destVal;
   }
 
+  // Duplicate detection — exact title match (case-insensitive, trimmed)
+  const existingTitles = new Set(tasks.map(t => t.title.trim().toLowerCase()));
+  const duplicates = selected.filter(item => existingTitles.has(item.text.trim().toLowerCase()));
+  let toImport = selected;
+
+  if (duplicates.length > 0) {
+    const dupList = duplicates.map(d => '• ' + d.text).join('\n');
+    const choice = confirm(
+      duplicates.length + ' duplicate' + (duplicates.length > 1 ? 's' : '') + ' found:\n\n' +
+      dupList + '\n\nTap OK to skip duplicates, or Cancel to import everything including duplicates.'
+    );
+    if (choice) {
+      // Skip duplicates
+      toImport = selected.filter(item => !existingTitles.has(item.text.trim().toLowerCase()));
+    }
+    // if cancelled — import all including duplicates (user chose to allow)
+  }
+
+  if (!toImport.length) {
+    alert('Nothing new to import after removing duplicates.');
+    return;
+  }
+
   const now = new Date().toISOString();
-  selected.forEach((item, i) => {
+  toImport.forEach((item, i) => {
     tasks.push({
       id: uid(),
       title: item.text,
@@ -2610,6 +2671,16 @@ function parsePasteText() {
   renderOcrItems();
   document.getElementById('ocr-count').textContent = ocrItems.length + ' ITEMS FOUND';
   document.getElementById('ocr-results').style.display = 'block';
+
+  // Populate destination tab dropdown (same as OCR flow)
+  const destSel = document.getElementById('ocr-dest-tab');
+  destSel.innerHTML = '<option value="__new">+ Create new tab</option>';
+  tabs.forEach(tab => {
+    const o = document.createElement('option');
+    o.value = tab.id; o.textContent = tab.label;
+    destSel.appendChild(o);
+  });
+
   document.getElementById('ocr-actions').style.display = 'flex';
   document.getElementById('paste-area-wrap').style.display = 'none';
 }
@@ -2804,7 +2875,7 @@ let compactDragCatId = null;
 function renderCompactView(el) {
   el.className = 'task-list compact-view';
 
-  let allActive = tasks.filter(t => !t.archived && !t.done && !(t.completedDate === todayStr()) && t.date === state.currentDay);
+  let allActive = tasks.filter(t => !t.archived && t.date === state.currentDay);
 
   // Get completed tasks for today (from archive)
   const completedToday = completed.filter(t => {
@@ -2873,30 +2944,27 @@ function renderCompactView(el) {
       if (t.done) textCls += ' is-done';
       else if (t.urgentFlag) textCls += ' is-urgent';
 
-      // Div tap target — iOS Safari swallows change events on <input> checkboxes
-      // inside overflow:hidden blocks. Div + touchend is reliable.
-      const cb = document.createElement('div');
-      cb.className = 'compact-task-cb' + (t.done ? ' cb-checked' : '');
-
-      function doCheck() {
+      // Checkbox
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!t.done;
+      cb.className = 'compact-task-cb';
+      cb.addEventListener('change', (e) => {
+        e.stopPropagation();
         const task = tasks.find(x => x.id === t.id);
-        if (!task || task.done) return; // guard: already done
-        task.done = true;
-        task.completedAt = new Date().toISOString();
-        task.lastAccessed = new Date().toISOString();
-        saveTasks();
-        archiveTask(task.id); // immediate, no delay
-      }
-
-      cb.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        doCheck();
-      }, { passive: false });
-
-      cb.addEventListener('click', (e) => {
-        e.stopPropagation();
-        doCheck();
+        if (!task) return;
+        task.done = cb.checked;
+        if (task.done) {
+          task.completedAt = new Date().toISOString();
+          task.lastAccessed = new Date().toISOString();
+          saveTasks();
+          setTimeout(() => { archiveTask(task.id); renderTaskList(); }, 600);
+        } else {
+          task.completedAt = null;
+          task.lastAccessed = new Date().toISOString();
+          saveTasks();
+          renderTaskList();
+        }
       });
 
       const textEl = document.createElement('div');
@@ -2995,9 +3063,13 @@ function renderCompactView(el) {
 let _catModalTaskIds = [];
 
 function openCatChecklist(catId, catLabel, catTasks) {
+  // Store IDs from the initial snapshot but refresh always queries live tasks[]
   _catModalTaskIds = catTasks.map(t => t.id);
+  // Also store catId so refresh can pick up any newly categorized tasks
+  const _catModalCatId = catId;
 
   function refresh() {
+    // Always query live tasks[] by ID — never use stale snapshot objects
     const liveTasks = tasks.filter(t => _catModalTaskIds.includes(t.id));
     const remaining = liveTasks.filter(t => !t.done).length;
     document.getElementById('cat-modal-title').textContent = catLabel;
@@ -3030,13 +3102,14 @@ function openCatChecklist(catId, catLabel, catTasks) {
       const check = top.querySelector('.cat-modal-check');
       check.onclick = () => {
         const task = tasks.find(x => x.id === t.id);
-        if (!task || task.done) return; // guard: already done
-        task.done = true;
-        task.completedAt = new Date().toISOString();
+        if (!task) return;
+        task.done = !task.done;
+        if (task.done) {
+          task.completedAt = new Date().toISOString();
+          setTimeout(() => { archiveTask(task.id); refresh(); renderTaskList(); }, 600);
+        } else { task.completedAt = null; }
         task.lastAccessed = new Date().toISOString();
-        saveTasks();
-        archiveTask(task.id); // immediate, no delay
-        refresh();
+        saveTasks(); refresh();
       };
       row.appendChild(top);
 
