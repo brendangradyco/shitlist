@@ -1948,14 +1948,26 @@ function toggleDone(id) {
   renderTaskList();
 }
 
+// Guard Set: prevents any code path from archiving the same task ID twice,
+// even if DOM rebuilds cause synthetic iOS clicks to re-fire mid-flight.
+const archivingIds = new Set();
+
 function archiveTask(id) {
+  // Guard 1: if this ID is already being archived, bail immediately
+  if (archivingIds.has(id)) return;
+  archivingIds.add(id);
+
   const idx = tasks.findIndex(t => t.id===id);
-  if (idx===-1) return;
+  if (idx===-1) { archivingIds.delete(id); return; }
   const t = tasks[idx];
-  if (!t.done) return; // unchecked before archive
+  if (!t.done) { archivingIds.delete(id); return; } // unchecked before archive
 
   // Store the local date the task was completed on (not the task's .date which may differ)
   const completedDay = t.completedAt ? t.completedAt.slice(0,10) : todayStr();
+
+  // Guard 2: idempotency — never push the same task ID into completed[] twice for the same day
+  const alreadyArchived = completed.some(c => c.id === id && c.archivedAt && c.archivedAt.slice(0,10) === completedDay);
+  if (alreadyArchived) { archivingIds.delete(id); return; }
 
   if (t.taskType === 'repeat') {
     // Repeat tasks: archive a snapshot but keep the live task — reset it instead of removing
@@ -1964,12 +1976,14 @@ function archiveTask(id) {
     t.completedAt = null;
     t.lastAccessed = new Date().toISOString();
     saveTasks(); saveCompleted();
+    archivingIds.delete(id);
     renderTaskList();
   } else {
     // Onetime tasks: archive and remove
     completed.push({ ...t, date: completedDay, archivedAt: new Date().toISOString() });
     tasks.splice(idx, 1);
     saveTasks(); saveCompleted();
+    archivingIds.delete(id);
     renderTaskList();
   }
 }
